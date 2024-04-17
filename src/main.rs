@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
-use inquire::{MultiSelect, Text};
+use inquire::{MultiSelect, Select, Text};
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     let mut config = read_config(&cli.config)?;
 
     match cli.subcommand {
-        SubCommand::Add(command) => profile(&mut config, &command).await?,
+        SubCommand::Add(command) => add(&mut config, &command).await?,
         SubCommand::Pull => pull(&config).await?,
         SubCommand::Clean => clean(&config).await?,
         SubCommand::Edit => edit(&mut config).await?,
@@ -152,37 +152,32 @@ async fn edit(config: &mut Config) -> anyhow::Result<()> {
         .map(|key| key.clone())
         .collect::<Vec<_>>();
 
-    let profiles = MultiSelect::new("Please choose profile to edit:", profiles)
+    let profile = Select::new("Please choose profile to edit:", profiles)
         .prompt()
         .context("Failed to prompt")?;
 
-    for profile in profiles {
-        let profile = config
-            .pull_profiles
-            .get_mut(&profile)
-            .expect("Profile not found");
+    let profile = config
+        .pull_profiles
+        .get_mut(&profile)
+        .expect("Profile not found");
 
-        let tags = profile
-            .tags
-            .iter()
-            .map(|tag| tag.clone())
-            .collect::<Vec<_>>();
+    let tags = profile
+        .tags
+        .iter()
+        .map(|tag| tag.clone())
+        .collect::<Vec<_>>();
 
-        let tags = MultiSelect::new("Please choose tags to remove:", tags)
-            .prompt()
-            .context("Failed to prompt")?;
+    let tags = MultiSelect::new("Please choose tags to keep:", tags)
+        .with_all_selected_by_default()
+        .prompt()
+        .context("Failed to prompt")?;
 
-        profile.tags = profile
-            .tags
-            .difference(&tags.iter().cloned().collect::<HashSet<_>>())
-            .cloned()
-            .collect();
-    }
+    profile.tags = tags.into_iter().collect();
 
     Ok(())
 }
 
-async fn profile(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
+async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
     let library = if let Some(library) = &command.library {
         library.clone()
     } else {
@@ -195,10 +190,7 @@ async fn profile(config: &mut Config, command: &AddCommand) -> anyhow::Result<()
     let name = if let Some(name) = &command.name {
         name.clone()
     } else {
-        Text::new("Name:")
-            .with_initial_value("name")
-            .prompt()
-            .context("Failed to prompt")?
+        Text::new("Name:").prompt().context("Failed to prompt")?
     };
 
     let names = if let Some(tags) = &command.tags {
