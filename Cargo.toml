@@ -1,6 +1,6 @@
 [package]
 name = "docker-pullator"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 repository = "https://github.com/Ekranos/docker-pullator"
 
@@ -27,6 +27,10 @@ tracing-subscriber = "0.3.18"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[profile.release]
+debug = false
+strip = true
 
 # Config for 'cargo dist'
 [workspace.metadata.dist]
