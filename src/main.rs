@@ -54,6 +54,10 @@ struct PushCommand {
     /// The registry to push the images to
     #[clap(short, long)]
     registry: String,
+
+    /// Clean after push
+    #[clap(short, long)]
+    clean: bool,
 }
 
 #[derive(Parser)]
@@ -61,9 +65,13 @@ struct SyncCommand {
     /// The registry to push the images to
     #[clap(short, long)]
     registry: String,
+
+    /// Clean after push
+    #[clap(short, long)]
+    clean: bool,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
@@ -76,16 +84,7 @@ async fn main() -> anyhow::Result<()> {
         SubCommand::Clean => clean(&config).await?,
         SubCommand::Edit => edit(&mut config).await?,
         SubCommand::Push(command) => push(&config, &command).await?,
-        SubCommand::Sync(command) => {
-            pull(&config).await?;
-            push(
-                &config,
-                &PushCommand {
-                    registry: command.registry.clone(),
-                },
-            )
-            .await?;
-        }
+        SubCommand::Sync(command) => sync(&config, &command).await?,
     }
 
     write_config(&cli.config, &config)?;
@@ -108,26 +107,38 @@ fn write_config(path: &str, config: &Config) -> anyhow::Result<()> {
     std::fs::write(path, content).context("Failed to write config")
 }
 
+async fn sync(config: &Config, command: &SyncCommand) -> anyhow::Result<()> {
+    pull(&config).await?;
+    push(
+        &config,
+        &PushCommand {
+            registry: command.registry.clone(),
+            clean: command.clean,
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn push(config: &Config, command: &PushCommand) -> anyhow::Result<()> {
     let mut responses: HashMap<String, FetchTagsResponse> = HashMap::new();
 
     for profile in config.pull_profiles.values() {
         for tag in &profile.tags {
-            let library = profile.library.as_ref().map(|l| l.as_str());
+            let image = image_name(profile.library.as_ref(), &profile.repo);
 
-            let response_key = image_name(library, &profile.repo);
-
-            let response = if let Some(response) = responses.get(&response_key) {
+            let response = if let Some(response) = responses.get(&image) {
                 response.clone()
             } else {
-                let response = fetch_tags(library, &profile.repo)
+                let response = fetch_tags(profile.library.clone(), &profile.repo)
                     .await
                     .context("Failed to fetch tags")?;
-                responses.insert(response_key.clone(), response.clone());
+                responses.insert(image.clone(), response.clone());
                 response
             };
 
-            let image = image_name(library, &profile.repo);
+            let image = image_name(profile.library.as_ref(), &profile.repo);
             let mut targets = vec![format!("{}/{}:{}", command.registry, &image, tag)];
 
             let item = response.results.iter().find(|item| &item.name == tag);
@@ -163,6 +174,10 @@ async fn push(config: &Config, command: &PushCommand) -> anyhow::Result<()> {
                     .context("Failed to remove image")?;
             }
         }
+    }
+
+    if command.clean {
+        clean(&config).await?;
     }
 
     Ok(())
@@ -215,7 +230,7 @@ async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
     let library = if library.is_empty() {
         None
     } else {
-        Some(library.as_ref())
+        Some(library)
     };
 
     let name = if let Some(name) = &command.name {
@@ -227,7 +242,7 @@ async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
     let names = if let Some(tags) = &command.tags {
         tags.clone()
     } else {
-        let mut response = fetch_tags(library, &name).await?;
+        let mut response = fetch_tags(library.as_ref(), &name).await?;
         response.results.sort_by(|a, b| b.name.cmp(&a.name));
 
         let names = response
@@ -241,13 +256,13 @@ async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
             .context("Failed to prompt")?
     };
 
-    let image = image_name(library, &name);
+    let image = image_name(library.as_ref(), &name);
 
     let profile = config
         .pull_profiles
         .entry(image)
         .or_insert_with(|| PullProfile {
-            library: library.map(|l| l.to_string()),
+            library: library.clone(),
             repo: name.clone(),
             tags: Default::default(),
         });
@@ -260,10 +275,12 @@ async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
 async fn clean(config: &Config) -> anyhow::Result<()> {
     for profile in config.pull_profiles.values() {
         for tag in &profile.tags {
+            let image = image_name(profile.library.as_ref(), &profile.repo);
+
             docker_command()
                 .arg("image")
                 .arg("rm")
-                .arg(&format!("{}:{}", profile.repo, tag))
+                .arg(&format!("{}:{}", image, tag))
                 .status()
                 .context("Failed to remove image")?;
         }
@@ -283,7 +300,7 @@ fn docker_command() -> Command {
 async fn pull(config: &Config) -> anyhow::Result<()> {
     for profile in config.pull_profiles.values() {
         for tag in &profile.tags {
-            let image = image_name(profile.library.as_ref().map(|s| s.as_str()), &profile.repo);
+            let image = image_name(profile.library.as_ref(), &profile.repo);
 
             docker_command()
                 .arg("pull")
@@ -296,15 +313,20 @@ async fn pull(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn image_name(library: Option<&str>, repo: &str) -> String {
+fn image_name(library: Option<impl AsRef<str>>, repo: &str) -> String {
     if let Some(library) = library {
-        format!("{}/{}", library, repo)
+        format!("{}/{}", library.as_ref(), repo)
     } else {
         repo.to_string()
     }
 }
 
-async fn fetch_tags(library: Option<&str>, repo: &str) -> anyhow::Result<FetchTagsResponse> {
+async fn fetch_tags(
+    library: Option<impl AsRef<str>>,
+    repo: &str,
+) -> anyhow::Result<FetchTagsResponse> {
+    let library = library.as_ref().map(|s| s.as_ref());
+
     let url = format!(
         "https://hub.docker.com/v2/repositories/{}/{}/tags?page_size=100&ordering=last_updated",
         library.unwrap_or("library"),

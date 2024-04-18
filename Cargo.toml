@@ -1,6 +1,6 @@
 [package]
 name = "docker-pullator"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 repository = "https://github.com/Ekranos/docker-pullator"
 
@@ -16,7 +16,10 @@ reqwest = { version = "0.12.3", default-features = false, features = [
 ] }
 serde = { version = "1.0.198", features = ["derive"] }
 serde_json = "1.0.116"
-tokio = { version = "1.37.0", features = ["full"] }
+tokio = { version = "1.37.0", default-features = false, features = [
+    "rt",
+    "macros",
+] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
 
