@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     process::{Command, Stdio},
 };
 
@@ -94,18 +94,22 @@ async fn push(config: &Config, command: &PushCommand) -> anyhow::Result<()> {
 
     for profile in config.pull_profiles.values() {
         for tag in &profile.tags {
-            let response_key = format!("{}/{}", profile.library, profile.name);
+            let library = profile.library.as_ref().map(|l| l.as_str());
+
+            let response_key = image_name(library, &profile.repo);
+
             let response = if let Some(response) = responses.get(&response_key) {
                 response.clone()
             } else {
-                let response = fetch_tags(&profile.library, &profile.name)
+                let response = fetch_tags(library, &profile.repo)
                     .await
                     .context("Failed to fetch tags")?;
                 responses.insert(response_key.clone(), response.clone());
                 response
             };
 
-            let mut targets = vec![format!("{}/{}:{}", command.repo, profile.name, tag)];
+            let image = image_name(library, &profile.repo);
+            let mut targets = vec![format!("{}/{}:{}", command.repo, &image, tag)];
 
             let item = response.results.iter().find(|item| &item.name == tag);
             if let Some(item) = item {
@@ -114,14 +118,14 @@ async fn push(config: &Config, command: &PushCommand) -> anyhow::Result<()> {
                         .results
                         .iter()
                         .filter(|x| x.digest == item.digest)
-                        .map(|item| format!("{}/{}:{}", command.repo, profile.name, item.name)),
+                        .map(|item| format!("{}/{}:{}", command.repo, &image, item.name)),
                 );
             }
 
             for target in targets {
                 docker_command()
                     .arg("tag")
-                    .arg(format!("{}:{}", profile.name, tag))
+                    .arg(format!("{}:{}", &image, tag))
                     .arg(&target)
                     .output()
                     .context("Failed to tag image")?;
@@ -182,9 +186,17 @@ async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
         library.clone()
     } else {
         Text::new("Library:")
-            .with_initial_value("library")
+            .with_help_message("empty for _")
             .prompt()
             .context("Failed to prompt")?
+            .trim()
+            .to_string()
+    };
+
+    let library = if library.is_empty() {
+        None
+    } else {
+        Some(library.as_ref())
     };
 
     let name = if let Some(name) = &command.name {
@@ -196,7 +208,7 @@ async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
     let names = if let Some(tags) = &command.tags {
         tags.clone()
     } else {
-        let mut response = fetch_tags(&library, &name).await?;
+        let mut response = fetch_tags(library, &name).await?;
         response.results.sort_by(|a, b| b.name.cmp(&a.name));
 
         let names = response
@@ -210,12 +222,14 @@ async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
             .context("Failed to prompt")?
     };
 
+    let image = image_name(library, &name);
+
     let profile = config
         .pull_profiles
-        .entry(format!("{}/{}", library, name))
+        .entry(image)
         .or_insert_with(|| PullProfile {
-            library: library.clone(),
-            name: name.clone(),
+            library: library.map(|l| l.to_string()),
+            repo: name.clone(),
             tags: Default::default(),
         });
 
@@ -230,7 +244,7 @@ async fn clean(config: &Config) -> anyhow::Result<()> {
             docker_command()
                 .arg("image")
                 .arg("rm")
-                .arg(&format!("{}:{}", profile.name, tag))
+                .arg(&format!("{}:{}", profile.repo, tag))
                 .status()
                 .context("Failed to remove image")?;
         }
@@ -252,7 +266,7 @@ async fn pull(config: &Config) -> anyhow::Result<()> {
         for tag in &profile.tags {
             docker_command()
                 .arg("pull")
-                .arg(&format!("{}:{}", profile.name, tag))
+                .arg(&format!("{}:{}", profile.repo, tag))
                 .status()
                 .context("Failed to pull image")?;
         }
@@ -261,15 +275,29 @@ async fn pull(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn fetch_tags(repo: &str, name: &str) -> anyhow::Result<FetchTagsResponse> {
-    let url = format!("https://hub.docker.com/v2/repositories/{repo}/{name}/tags?page_size=100&ordering=last_updated");
+fn image_name(library: Option<&str>, repo: &str) -> String {
+    if let Some(library) = library {
+        format!("{}/{}", library, repo)
+    } else {
+        repo.to_string()
+    }
+}
+
+async fn fetch_tags(library: Option<&str>, repo: &str) -> anyhow::Result<FetchTagsResponse> {
+    let url = format!(
+        "https://hub.docker.com/v2/repositories/{}/{}/tags?page_size=100&ordering=last_updated",
+        library.unwrap_or("library"),
+        repo
+    );
+
+    let image = image_name(library, repo);
 
     reqwest::get(url)
         .await
-        .with_context(|| format!("Failed to fetch tags for {}/{}", repo, name))?
+        .with_context(|| format!("Failed to fetch tags for {image}"))?
         .json()
         .await
-        .with_context(|| format!("Failed to parse response for {}/{}", repo, name))
+        .with_context(|| format!("Failed to parse response for {image}"))
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -279,9 +307,9 @@ struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PullProfile {
-    library: String,
-    name: String,
-    tags: HashSet<String>,
+    library: Option<String>,
+    repo: String,
+    tags: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
