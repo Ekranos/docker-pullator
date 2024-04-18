@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "docker-pullator"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",

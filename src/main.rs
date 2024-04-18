@@ -264,9 +264,11 @@ fn docker_command() -> Command {
 async fn pull(config: &Config) -> anyhow::Result<()> {
     for profile in config.pull_profiles.values() {
         for tag in &profile.tags {
+            let image = image_name(profile.library.as_ref().map(|s| s.as_str()), &profile.repo);
+
             docker_command()
                 .arg("pull")
-                .arg(&format!("{}:{}", profile.repo, tag))
+                .arg(&format!("{}:{}", image, tag))
                 .status()
                 .context("Failed to pull image")?;
         }
