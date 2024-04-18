@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     process::{Command, Stdio},
 };
 
@@ -42,7 +42,7 @@ struct AddCommand {
 
     /// The name of the image to pull
     #[clap(short, long)]
-    name: Option<String>,
+    repo: Option<String>,
 
     /// The tags to pull
     #[clap(short, long)]
@@ -126,7 +126,7 @@ async fn push(config: &Config, command: &PushCommand) -> anyhow::Result<()> {
 
     for profile in config.pull_profiles.values() {
         for tag in &profile.tags {
-            let image = image_name(profile.library.as_ref(), &profile.repo);
+            let image = profile.image();
 
             let response = if let Some(response) = responses.get(&image) {
                 response.clone()
@@ -138,7 +138,6 @@ async fn push(config: &Config, command: &PushCommand) -> anyhow::Result<()> {
                 response
             };
 
-            let image = image_name(profile.library.as_ref(), &profile.repo);
             let mut targets = vec![format!("{}/{}:{}", command.registry, &image, tag)];
 
             let item = response.results.iter().find(|item| &item.name == tag);
@@ -190,20 +189,17 @@ async fn edit(config: &mut Config) -> anyhow::Result<()> {
         .map(|key| key.clone())
         .collect::<Vec<_>>();
 
-    let profile = Select::new("Please choose profile to edit:", profiles)
+    let image = Select::new("Please choose profile to edit:", profiles)
         .prompt()
         .context("Failed to prompt")?;
 
-    let profile = config
+    let mut profile = config
         .pull_profiles
-        .get_mut(&profile)
-        .expect("Profile not found");
+        .get(&image)
+        .expect("profile should exist")
+        .clone();
 
-    let tags = profile
-        .tags
-        .iter()
-        .map(|tag| tag.clone())
-        .collect::<Vec<_>>();
+    let tags = profile.tags.iter().cloned().collect::<Vec<_>>();
 
     let tags = MultiSelect::new("Please choose tags to keep:", tags)
         .with_all_selected_by_default()
@@ -211,6 +207,12 @@ async fn edit(config: &mut Config) -> anyhow::Result<()> {
         .context("Failed to prompt")?;
 
     profile.tags = tags.into_iter().collect();
+
+    if profile.tags.is_empty() {
+        config.pull_profiles.remove(&image);
+    } else {
+        config.pull_profiles.insert(image, profile);
+    }
 
     Ok(())
 }
@@ -233,50 +235,49 @@ async fn add(config: &mut Config, command: &AddCommand) -> anyhow::Result<()> {
         Some(library)
     };
 
-    let name = if let Some(name) = &command.name {
-        name.clone()
+    let repo = if let Some(repo) = &command.repo {
+        repo.clone()
     } else {
-        Text::new("Name:").prompt().context("Failed to prompt")?
+        Text::new("Repo:").prompt().context("Failed to prompt")?
     };
 
-    let names = if let Some(tags) = &command.tags {
+    let mut response = fetch_tags(library.as_ref(), &repo).await?;
+
+    let tags = if let Some(tags) = &command.tags {
         tags.clone()
     } else {
-        let mut response = fetch_tags(library.as_ref(), &name).await?;
         response.results.sort_by(|a, b| b.name.cmp(&a.name));
 
-        let names = response
+        let tags = response
             .results
             .iter()
             .map(|item| item.name.clone())
             .collect::<Vec<_>>();
 
-        MultiSelect::new("Please choose wanted images:", names)
+        MultiSelect::new("Please choose wanted images:", tags)
             .prompt()
             .context("Failed to prompt")?
     };
 
-    let image = image_name(library.as_ref(), &name);
-
     let profile = config
         .pull_profiles
-        .entry(image)
+        .entry(image_name(library.as_ref(), &repo))
         .or_insert_with(|| PullProfile {
-            library: library.clone(),
-            repo: name.clone(),
-            tags: Default::default(),
+            library,
+            repo,
+            tags: vec![],
         });
 
-    profile.tags.extend(names);
+    profile.tags.extend(tags);
 
     Ok(())
 }
 
 async fn clean(config: &Config) -> anyhow::Result<()> {
     for profile in config.pull_profiles.values() {
-        for tag in &profile.tags {
-            let image = image_name(profile.library.as_ref(), &profile.repo);
+        let image = profile.image();
 
+        for tag in &profile.tags {
             docker_command()
                 .arg("image")
                 .arg("rm")
@@ -300,13 +301,17 @@ fn docker_command() -> Command {
 async fn pull(config: &Config) -> anyhow::Result<()> {
     for profile in config.pull_profiles.values() {
         for tag in &profile.tags {
-            let image = image_name(profile.library.as_ref(), &profile.repo);
+            let image = profile.image();
 
-            docker_command()
+            let status = docker_command()
                 .arg("pull")
                 .arg(&format!("{}:{}", image, tag))
                 .status()
                 .context("Failed to pull image")?;
+
+            if !status.success() {
+                anyhow::bail!("Pull failed with status: {status}");
+            }
         }
     }
 
@@ -328,10 +333,12 @@ async fn fetch_tags(
     let library = library.as_ref().map(|s| s.as_ref());
 
     let url = format!(
-        "https://hub.docker.com/v2/repositories/{}/{}/tags?page_size=100&ordering=last_updated",
+        "https://hub.docker.com/v2/repositories/{}/{}/tags?page_size=100",
         library.unwrap_or("library"),
         repo
     );
+
+    tracing::trace!("fetch_tags URL: {url}");
 
     let image = image_name(library, repo);
 
@@ -348,11 +355,17 @@ struct Config {
     pull_profiles: BTreeMap<String, PullProfile>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PullProfile {
     library: Option<String>,
     repo: String,
-    tags: BTreeSet<String>,
+    tags: Vec<String>,
+}
+
+impl PullProfile {
+    fn image(&self) -> String {
+        image_name(self.library.as_ref(), &self.repo)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,5 +376,12 @@ struct FetchTagsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FetchTagsItem {
     name: String,
-    digest: String,
+    images: Vec<FetchTagsImageItem>,
+    digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FetchTagsImageItem {
+    os: String,
+    architecture: String,
 }
