@@ -30,6 +30,8 @@ enum SubCommand {
     Edit,
     /// Push images to a registry
     Push(PushCommand),
+    /// Pull and push
+    Sync(SyncCommand),
 }
 
 #[derive(Parser)]
@@ -50,8 +52,15 @@ struct AddCommand {
 #[derive(Parser)]
 struct PushCommand {
     /// The registry to push the images to
-    #[clap(long)]
-    repo: String,
+    #[clap(short, long)]
+    registry: String,
+}
+
+#[derive(Parser)]
+struct SyncCommand {
+    /// The registry to push the images to
+    #[clap(short, long)]
+    registry: String,
 }
 
 #[tokio::main]
@@ -67,6 +76,16 @@ async fn main() -> anyhow::Result<()> {
         SubCommand::Clean => clean(&config).await?,
         SubCommand::Edit => edit(&mut config).await?,
         SubCommand::Push(command) => push(&config, &command).await?,
+        SubCommand::Sync(command) => {
+            pull(&config).await?;
+            push(
+                &config,
+                &PushCommand {
+                    registry: command.registry.clone(),
+                },
+            )
+            .await?;
+        }
     }
 
     write_config(&cli.config, &config)?;
@@ -109,7 +128,7 @@ async fn push(config: &Config, command: &PushCommand) -> anyhow::Result<()> {
             };
 
             let image = image_name(library, &profile.repo);
-            let mut targets = vec![format!("{}/{}:{}", command.repo, &image, tag)];
+            let mut targets = vec![format!("{}/{}:{}", command.registry, &image, tag)];
 
             let item = response.results.iter().find(|item| &item.name == tag);
             if let Some(item) = item {
@@ -118,7 +137,7 @@ async fn push(config: &Config, command: &PushCommand) -> anyhow::Result<()> {
                         .results
                         .iter()
                         .filter(|x| x.digest == item.digest)
-                        .map(|item| format!("{}/{}:{}", command.repo, &image, item.name)),
+                        .map(|item| format!("{}/{}:{}", command.registry, &image, item.name)),
                 );
             }
 
